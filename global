@@ -1,0 +1,85 @@
+module global 
+implicit none
+
+ integer,parameter::dp=kind(0.0d0)
+ integer ::  i, j, m, n, allocatestatus
+
+ !---------- GEOMETRIES ----------
+ double precision,parameter:: lmda = 0.5d0, e = 2.718d0, Gama = 1.781d0, &
+      pi = 3.14159265358979323846264d0
+ double precision k, Zo, a, count, sn, Factor, sy, sx
+ integer          r, c, L(2)
+ double precision,Dimension(:)    ,allocatable::theta, gx, gy, rm, theta_m
+ double precision,Dimension(:,:)  ,allocatable::Snm, Phinm, RHOmn,ro, &
+      ph, Y, X, RHO, PHI
+ double precision,Dimension(:,:,:),allocatable::Y_n, X_n, RHO_n
+
+ !----------- CALCULATIONS -----------
+ complex(kind=dp),Dimension(:)    ,allocatable::Vm, Jf, JfAll,VmAll
+ complex(kind=dp),dimension(:,:)  ,allocatable::Hank_TM, Zmn_TM
+ complex(kind=dp),Dimension(:,:)  ,allocatable::E_i, Es_TM
+ complex(kind=dp),Dimension(:,:,:),allocatable::Hank_n_TM
+
+ !----------- LU METHOD VARIABLES -----------
+ integer,dimension(:),allocatable:: ipiv
+ integer :: info
+ integer :: nn, nrhs, lda, ldb
+
+ !----------- TFQMR METHOD VARIABLES -----------
+ complex(kind=dp),Dimension(:)    ,allocatable::r0_initial, precond
+ integer one_n, iter, oper
+ real(kind=dp) err
+ logical :: do_precon = .False.
+
+ !----------- MPI VARIABLES -----------
+ integer :: ierr, rank, numprocs, remainder, chunk, LB, UB,ochunk
+ integer,dimension(:),allocatable::pcount,disp
+ double precision :: starttime, endtime
+
+ !----------- RCS VARIABLES -----------
+ double precision,Dimension(:),allocatable:: ObsPhi, RCS_phi
+ double precision:: Wn, Cl 
+ complex(kind=dp) :: RCS, c_j,mm
+
+Contains
+
+  double precision function  angle(xComponent,yComponent)
+    double precision, INTENT(IN) :: xComponent, yComponent
+    double precision theta
+    theta = atan(yComponent/xComponent)
+    if (xComponent >= 0 .and. yComponent >= 0) then
+       angle = theta
+    else
+       if (xComponent < 0 .and. yComponent > 0) then
+          angle = pi - theta
+       else
+          if (xComponent < 0 .and. yComponent < 0) then
+             angle = pi + theta
+          else
+             angle = 1.5*pi + theta
+          end if
+       end if
+    end if
+  end function angle
+
+  !!!!!!!!!!!Calculate the length, Lower Bound, and Upper Bound of each process!!!!!!!!!!
+  subroutine segment(chunk,UB,LB)
+    integer, intent(IN) ::chunk
+    integer, intent(OUT)::UB,LB
+    integer             ::factor
+    if (rank < remainder) then
+       LB = 1 + chunk*rank
+       UB = chunk + chunk*rank
+    else
+       LB = 1 + chunk*rank + remainder
+       UB = chunk + chunk*rank + remainder
+    end if
+  end subroutine segment
+
+  !!!!!!!!!!!Convert each column from local to global for calculations!!!!!!!!!
+  integer function point(uu)
+   integer, intent(IN) :: uu
+   point = LB+(uu-1)
+ end function point
+
+end module global

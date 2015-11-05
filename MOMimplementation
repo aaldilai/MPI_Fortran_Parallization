@@ -1,0 +1,245 @@
+program MOMimplementation
+ use BesselH     !Bessel Functions Module
+ use global      !Variables and function
+ use MatVecMult  !Iterative method Module
+ use mpi 
+ implicit none
+
+!Start allocations
+ allocate(theta(500), STAT = allocatestatus)
+ allocate(gx(size(theta)),STAT = allocatestatus)
+ allocate(gy(size(theta)),STAT = allocatestatus)
+ allocate(rm(size(gx)),STAT = allocatestatus)
+ allocate(theta_m(size(theta)),STAT = allocatestatus)
+ allocate(Snm(size(gx),size(gx)),STAT = allocatestatus)
+ allocate(Phinm(size(gx),size(gx)),STAT = allocatestatus)
+ allocate(RHOmn(size(Snm,1),size(Snm,2)),STAT = allocatestatus)
+ allocate(ro(46,1),STAT = allocatestatus)
+ allocate(ph(1,700), STAT = allocatestatus)
+ allocate(X(size(ro),size(ph)),STAT = allocatestatus)
+ allocate(Y(size(ro),size(ph)),STAT = allocatestatus)
+ allocate(RHO(size(ro),size(ph)),STAT = allocatestatus)
+ allocate(PHI(size(ro),size(ph)),STAT = allocatestatus)
+ allocate(X_n(size(RHO,1),size(RHO,2),size(gx)),STAT= allocatestatus)
+ allocate(Y_n(size(RHO,1),size(RHO,2),size(gx)),STAT= allocatestatus)
+ allocate(RHO_n(size(RHO,1),size(RHO,2),size(gx)),STAT = allocatestatus)
+ allocate(Hank_TM(size(gx),size(gy)),STAT=allocatestatus)
+ allocate(precond(1:one_n))
+ allocate(E_i(L(1),L(2)))
+ allocate(Hank_n_TM(size(RHO_n,1),size(RHO_n,2),size(RHO_n,3)))
+ allocate(ObsPhi(360))
+ allocate(RCS_phi(size(ObsPhi)))
+!End allocations
+
+!!!!!!!!!Initializing Geometries!!!!!!!!!!
+
+ do i = 1,500
+    theta(i) = theta(i-1) + 2.0d0*pi/500.0d0
+ end do
+
+ a      = .99d0*lmda
+ k      = 2.0d0*pi/lmda
+ Zo     = 120.0d0*pi
+ sn     = a*(theta(2)-theta(1))            !segment length
+ Factor = k*sn*Zo/4   
+
+ one_n = size(theta)
+
+ 
+ gx     = a*cos(theta)                     !Grid on the scatterer (cylinder)
+ gy     = a*sin(theta)
+
+!!!!!!!!!Scatterer discritization distance vectors!!!!!!!!!
+
+ rm = a 
+ theta_m = theta
+
+ Do m = 1, size(gx)
+    Do n = 1, size(gx)
+       Snm(m,n)   = sqrt(rm(m)**2 + rm(n)**2 - 2*rm(m)*rm(n)*cos(theta_m(n)-theta_m(m))) 
+       sy         = rm(n)*sin(theta_m(n)) - rm(m)*sin(theta_m(m))
+       sx         = rm(n)*cos(theta_m(n)) - rm(m)*cos(theta_m(m)) 
+       Phinm(n,m) = angle(sy,sx) 
+    end do
+ end do
+
+ RHOmn = Snm  
+
+! -----------------------------------------
+!   Grid Calculations
+!   Unique to both MoM and Mie Formulation
+! -----------------------------------------
+
+ do i = 1,46
+    ro(i,1) = 0.5d0 + 0.1d0*(i-1)
+ end do
+
+ do i = 1,700
+    ph(1,i) = ph(1, i-1) + 2.0d0*pi/700.0d0
+ end do
+
+ X = matmul(ro,cos(ph))
+ Y = matmul(ro,sin(ph))
+ RHO = sqrt(X**2 + Y**2)
+ PHI = atan2(Y,X)
+
+ r = size(RHO,1)
+ c = size(RHO,2)
+
+ L(1) = r
+ L(2) = c
+
+! -----------------------------------------------------------------
+!    Calculating Modified Grid |P - Pn|
+!    Distance of observation space w.r.t the object discritization
+! -----------------------------------------------------------------
+
+ do i = 1, size(gx) ! No of segments
+    do j = 1,L(1)    ! No of rows in the observation matrix RHO
+       X_n(j,:,i) = X(j,:) - gx(i)
+       Y_n(j,:,i) = Y(j,:) - gy(i)    ! Computed new P - P'
+    end do
+ end do
+ RHO_n = sqrt(X_n**2 + Y_n**2)
+
+! --------------------------------
+! Calculation of Zmn
+! --------------------------------
+
+! --------------
+! # 2 - Appendix
+! --------------
+ 
+ do i = 1, size(gx)
+    do j = 1, size(gy)
+       Hank_TM(i,j)  = bessel_h(0.0d0, k*abs(RHOmn(i,j)))
+    end do
+ end do
+
+ 
+ call MPI_INIT(ierr)
+ call MPI_COMM_RANK(MPI_COMM_WORLD, rank, ierr)
+ call MPI_COMM_SIZE(MPI_COMM_WORLD, numprocs, ierr)
+ starttime = MPI_WTIME()
+ print*, "process number ", rank, " of ", numprocs
+ !----Settings----
+ ochunk = one_n/numprocs
+ remainder = mod(one_n,numprocs)
+ !----Determining Chunks(length) for each process----
+ chunk = ochunk
+ if (remainder /= 0 .and. rank <= remainder-1) chunk = ochunk + 1
+ !----Determining columns numbers for each process----
+ call segment(chunk,UB,LB)
+ print*, "Process #", rank, "with LB,UB = ", LB, UB
+ print*, "Processor num ", rank, 'with chunk', chunk
+
+ allocate(Zmn_TM(size(gx),chunk),STAT = allocatestatus)
+ allocate(Vm(chunk), STAT = allocatestatus)
+ allocate(Jf(size(Vm)))
+ allocate(JfAll(one_n),VmAll(one_n))
+ allocate(pcount(numprocs),disp(numprocs))
+
+ do i = 1,size(gx)
+    do j = 1,chunk
+       if (i /= point(j)) then
+          Zmn_TM(i,j) = Factor*Hank_TM(i,point(j))
+       else ! if (i == j) then
+          Zmn_TM(i,j) = cmplx(Factor, -1*Factor*(2/pi)*log(k*Gama*sn/(4*e)))
+       end if
+    end do
+ end do
+ print*, "Processor #",rank," finsihed filling Zmn_TM"
+ 
+ 
+! -------------------------------
+! Calculation of Js
+! -------------------------------
+ do i=1,chunk
+ Vm(i)  = exp(cmplx(0,-1*k*a*cos(theta(point(i))))) !incident field only on the scatterer
+ end do 
+ print*, "Processor #",rank," finsihed filling Vm"
+
+ !read input file to determine which method to use
+ open(unit=55,file='mom.inp',status='old')
+ read(55,*) oper
+ close(unit=55)
+
+ if (oper == 1) then !Use LU method through Lapack subroutine ZGESV
+
+    JfAll = Vm
+    lda  = size(Zmn_TM,1)
+    nn   = size(Zmn_TM,2)
+    ldb  = size(Jf,1)
+    nrhs = 1    !size(Jf,2)
+    allocate(ipiv(nn))
+    call zgesv(nn,nrhs,Zmn_TM,lda,ipiv,JfAll,ldb,info)
+    
+ else if (oper == 2) then !Use Iterative method from MatVecMult module
+
+    disp=0
+    do i = 1, numprocs
+       if (i<=remainder)then
+          pcount(i)=ochunk+1
+       else
+          pcount(i)=ochunk
+       end if
+       disp(i)=disp(i-1)+pcount(i-1)
+    end do
+!!!!!gather RHS from different matrix sizes and distribute to all processes!!!!!
+    call MPI_ALLGATHERv(Vm,chunk,MPI_DOUBLE_COMPLEX,VmAll,pcount,disp,MPI_DOUBLE_COMPLEX,MPI_COMM_WORLD,ierr) 
+    JfAll=0 
+    err   = 1e-12
+    iter  = 600
+    call initialize_r0
+    call ztfqmr(one_n,VmAll,JfAll,err,iter) 
+    call MPI_BARRIER(MPI_COMM_WORLD,ierr)
+
+ end if
+ endtime = MPI_WTIME()
+ if(rank==0)print*,'time is', endtime-starttime, 'seconds'
+ call MPI_FINALIZE(ierr)
+  
+! ---------------------------------------
+! Calculation of Scattered Field
+! ---------------------------------------
+
+ E_i    = exp(cmplx(0,-1*k*RHO*cos(PHI)))   !incident field on the observ. grid
+ 
+ do i = 1, size(RHO_n,1)
+    do j = 1, size(RHO_n,2)
+       do m = 1, size(RHO_n,3)
+          Hank_n_TM(i,j,m)  = bessel_h(0.0d0, k*abs(RHO_n(i,j,m)))
+       end do
+    end do
+ end do
+
+ allocate(Es_TM(L(1),L(2)))
+ do i = 1, size(Hank_n_TM,3)
+    Es_TM(:,:) = Es_TM(:,:) - Factor*Hank_n_TM(:,:,i)*JfAll(i)
+ end do
+
+ 
+! ------------------------------------
+! Calculation of RCS
+! ------------------------------------
+
+ do i = 1, 360
+    ObsPhi(i) = ObsPhi(i-1) + 2*pi/360
+ end do
+
+ Cl = 3e8
+ c_j = cmplx(0.0d0,1.0d0)
+ do i = 1, size(ObsPhi)
+    RCS = 0
+    do j= 1, size(gx)
+       RCS = RCS + JfAll(j)*sn*exp(c_j*k*(gx(j)*cos(ObsPhi(i))+gy(j)*&
+            sin(ObsPhi(i))))
+    end do
+    RCS_phi(i) = (abs(RCS)**2)*(k/(4*Cl**2))
+ end do
+
+ print*, 'reached final'
+
+!----Deallocate everything----
+deallocate(theta,gx,gy,rm,theta_m,Snm,Phinm,RHOmn,ro,ph,X,Y,PHI,RHO,X_n,Y_n,RHO_n,Hank_TM,precond,E_i,Hank_n_TM,Es_TM,Vm,Jf,JfAll,VmAll,Zmn_TM,r0_initial,ObsPhi,RCS_phi,pcount,disp)
+end program MOMimplementation

@@ -1,0 +1,202 @@
+module MatVecMult
+ !use global,only:dp,rank
+ !use global,only:one_n,chunk
+ use global
+ use mpi 
+ !use mpi
+ implicit none
+ save
+ !complex(kind=dp),allocatable::r0_initial(:)
+contains
+!-----------------------------------------------------------------------------------------------------------------
+ subroutine ztfqmr(ntotal,b,x,err,iter)
+  ! b is RHS vector, x is the desired solution vector....J,,,
+   use global,only:r0_initial
+   ! use mat_vec_mult,only:matvec,precon
+   implicit none
+   integer,intent(in)::ntotal
+   complex(kind=dp),intent(inout),dimension(1:ntotal)::x
+   complex(kind=dp),intent(in),dimension(1:ntotal)::b
+   complex(kind=dp),dimension(1:ntotal)::bb
+   real(kind=dp)::err,rerr
+   integer::iter,itmax,it
+   complex(kind=dp),dimension(1:ntotal)::w,yo,ayo,ye,aye,r,d,v
+   real(kind=dp)::ta,we,cm
+   complex(kind=dp)::etha,rho,amgis,ahpla,dum,beta
+   real(kind=dp)::bmag
+   integer::ndim
+   ! print*,x
+   !stop
+   ndim=ntotal 
+   itmax=iter
+   if (iter.eq.0) itmax=ntotal
+   bb(1:ndim)=precon(b(1:ndim))
+   !
+   !  set initial values
+   !
+   d(1:ndim)=cmplx(0.0_dp,0.0_dp,dp)
+   call matvec(x(1:ndim),r(1:ndim))
+   r(1:ndim)=bb(1:ndim)-r(1:ndim) !residual from the initial guess
+   w(1:ndim)=r(1:ndim)
+   yo(1:ndim)=r(1:ndim)
+   call matvec(yo(1:ndim),ayo(1:ndim))
+   v(1:ndim)=ayo(1:ndim)
+   we =0.0_dp
+   etha=cmplx(0.0_dp,0.0_dp,dp)
+
+   ta=sqrt(dot_product(r(1:ndim),r(1:ndim)))
+   rho=dot_product(r0_initial(1:ndim),r(1:ndim))
+   bmag=sqrt(dot_product(bb(1:ndim),bb(1:ndim)))
+   rerr=ta/bmag
+   
+   iters: do it=1,itmax
+      amgis=dot_product(r0_initial(1:ndim),v(1:ndim))
+      ahpla=rho/amgis
+      ye(1:ndim)=yo(1:ndim)-ahpla*v(1:ndim)
+      call matvec(ye(1:ndim),aye(1:ndim))
+      !  start odd (2n-1) m loop
+      d(1:ndim)=yo(1:ndim)+(we*we*etha/ahpla)*d(1:ndim)
+      w(1:ndim)=w(1:ndim)-ahpla*ayo(1:ndim)
+      we=sqrt(abs(dot_product(w(1:ndim),w(1:ndim))))/ta
+      cm=1.0d0/sqrt(1.0d0+we*we)
+      ta=ta*we*cm
+      etha=ahpla*cm*cm
+      x(1:ndim)=x(1:ndim)+etha*d(1:ndim)
+      !  check if the result has converged.
+      !a        if (err*bmag .gt. ta*sqrt(2.*it)) then
+      !
+      !  start even (2n)  m loop
+      d(1:ndim)=ye(1:ndim)+(we*we*etha/ahpla)*d(1:ndim)
+      w(1:ndim)=w(1:ndim)-ahpla*aye(1:ndim)
+      we=sqrt(abs(dot_product(w(1:ndim),w(1:ndim))))/ta
+      cm=1.0d0/sqrt(1.0d0+we*we)
+      ta=ta*we*cm
+      etha=ahpla*cm*cm
+      x(1:ndim)=x(1:ndim)+etha*d(1:ndim)
+      !  check if the result has converged.
+!---------------------------------------------------------------------------for
+!exporting fort 400..................
+      !if (mod(it,5)==0 .or. rerr<5.0_dp*err) then
+         call matvec(x(1:ndim),r(1:ndim))
+         r(1:ndim)=bb(1:ndim) -r(1:ndim)
+         rerr=sqrt(abs(dot_product(r(1:ndim),r(1:ndim))))/bmag
+         if(rank==0)print*,'#ofiter,error:',it,rerr   !annoying
+         write(4000,*) it,rerr              ! writing the iteration
+!and residual error into a fort file
+         if (err > rerr) then
+            err=rerr
+            iter=it
+            return
+         endif
+      !end if
+! -------------------------------------------------------------------------------------------------------------
+      !  make preparations for next iteration
+      dum=dot_product(r0_initial(1:ndim),w(1:ndim))
+      beta=dum/rho
+      rho=dum
+      yo(1:ndim)=w(1:ndim)+beta*ye(1:ndim)
+      call matvec(yo(1:ndim),ayo(1:ndim))
+      !MAGIC
+      v(1:ndim)=ayo(1:ndim)+beta*( aye(1:ndim)+beta*v(1:ndim) )
+   enddo iters
+   !
+   call matvec(x(1:ndim),r(1:ndim)) ! this is the imp thing to look for.,...
+   !MAGIC
+   r(1:ndim)=bb(1:ndim)-r(1:ndim)
+   err=sqrt(abs(dot_product(r(1:ndim),r(1:ndim))))/bmag
+   iter=itmax
+   return
+ end subroutine ztfqmr
+! --------------------------------------------------------------------------------------------------------
+ subroutine matvec(xin,xout) ! takes input xin... any vector.... and 
+!the subroutine already contains.. the mtrix... it multiplies the
+!vector with the Z matrix.... and gives output.... in xout....
+   use global,only:Zmn_TM,ierr
+   implicit none
+   complex(kind=dp),intent(in)::xin(1:one_n)   
+   complex(kind=dp),intent(out)::xout(1:one_n) 
+   complex(kind=dp)::tempxout(1:one_n)  
+   integer::i,j
+
+   xout(1:one_n)=cmplx(0.0_dp,0.0_dp,dp)
+   tempxout(1:one_n)=cmplx(0.0_dp,0.0_dp,dp)
+
+
+      do j=1,chunk
+         tempxout(1:one_n) = tempxout(1:one_n) + Zmn_TM(1:one_n,j)*xin(point(j)) 
+      enddo
+      !Collect xout and distribute to all processes for next iteration
+      call MPI_ALLREDUCE(tempxout,xout,one_n,MPI_DOUBLE_COMPLEX,MPI_SUM,MPI_COMM_WORLD,ierr) 
+
+ end subroutine matvec
+!-------------------------------------------------------------------------------------------------------------
+ subroutine initialize_r0
+   use global,only:r0_initial
+   implicit none
+   integer::jran,i
+   real(kind=dp)::r0_dummy(1:2*one_n)
+
+   allocate(r0_initial(1:one_n))
+
+   ! jran=1211
+   jran=-3
+   do i=1,2*one_n
+      r0_dummy(i)=2.0_dp*real(ran1(jran),dp)-1.0_dp
+   end do
+   do i=1,one_n
+      r0_initial(i)=cmplx(r0_dummy(i),r0_dummy(one_n+i),dp)
+   end do
+   print*,'r0_initial is filled...'
+   return
+
+ end subroutine initialize_r0
+
+
+ function ran1(idum)
+   implicit none
+   integer,intent(inout)::idum
+   integer,PARAMETER::IM=2147483647,IQ=127773,IR=2836,IA=16807,NTAB=32
+   integer::NDIV
+   real,parameter::EPS=1.2E-7,RNMX=1.-EPS
+   real::am,ran1
+   integer::j,k,iv(NTAB)=0,iy=0
+   SAVE iv,iy
+
+   NDIV=1+(IM-1)/NTAB
+   AM=1./IM
+
+   if (idum<= 0 .or. iy== 0) then
+      idum=max(-idum,1)
+      do j=NTAB+8,1,-1
+         k=idum/IQ
+         idum=IA*(idum-k*IQ)-IR*k
+         if (idum .lt. 0) idum=idum+IM
+         if (j .le. NTAB) iv(j)=idum
+      end do
+      iy=iv(1)
+   end if
+   k=idum/IQ
+   idum=IA*(idum-k*IQ)-IR*k
+   if (idum .lt. 0) idum=idum+IM
+   j=1+iy/NDIV
+   iy=iv(j)
+   iv(j)=idum
+   ran1=min(AM*iy,RNMX)
+   return
+ end function ran1
+
+! NO preconditioning
+ function precon(u)
+   use global,only:precond,do_precon
+   implicit none
+   complex(kind=dp),intent(in)::u(1:one_n)
+   complex(kind=dp)::precon(1:one_n)
+   if (do_precon) then
+      precon(1:one_n)=precond(1:one_n)*u(1:one_n)
+   else 
+      precon(1:one_n)=u(1:one_n)
+   end if
+   return
+ end function precon
+
+end module MatVecMult
